@@ -1,0 +1,47 @@
+name: Photo Sync
+on:
+  push:
+    paths: ["photos/**"]
+permissions:
+  contents: write
+concurrency:
+  group: photo-sync
+  cancel-in-progress: true
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for uploads to settle
+        run: sleep 15
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prune git history (squash, i4tow)
+        run: |
+          set -euo pipefail
+          # Guard: never force-push an empty tree (a bad checkout must not wipe the repo).
+          test -n "$(git ls-files)"
+          EXPECT="$(git rev-parse HEAD)"
+          git config user.name 'i4tow-bot'
+          git config user.email 'bot@i4tow.date'
+          git checkout --orphan _i4tow_pruned
+          git add -A
+          git commit -q -m 'Prune git history (i4tow)'
+          git branch -M _i4tow_pruned main
+          # Force-push via GITHUB_TOKEN (no workflow re-trigger). Lease aborts
+          # cleanly if origin/main moved since checkout - next sync prunes instead.
+          git push --force-with-lease="main:${EXPECT}" origin main || echo "main moved since checkout; next sync will prune"
+      - name: Notify i4tow of sync result
+        if: ${{ !cancelled() }}
+        env:
+          I4TOW_SYNC_TOKEN: ${{ secrets.I4TOW_SYNC_TOKEN }}
+        run: |
+          test -n "$I4TOW_SYNC_TOKEN"
+          STATUS="${{ job.status }}"
+          MESSAGE="GitHub gallery sync completed."
+          if [ "$STATUS" != "success" ]; then
+            MESSAGE="GitHub gallery sync failed. Review this GitHub Actions run."
+          fi
+          curl -fsS -X POST https://api.i4tow.date/webhooks/photo-sync \
+            -H "Content-Type: application/json" \
+            -d "{\"albumId\":\"cms5390px0001hzqyy90oeyiv\",\"token\":\"$I4TOW_SYNC_TOKEN\",\"status\":\"$STATUS\",\"message\":\"$MESSAGE\",\"runUrl\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
